@@ -398,7 +398,7 @@ impl LiquidCacheReaderInner {
             );
         }
 
-        // Phase 2: If any columns missed, read from parquet ONCE for all misses.
+        // Phase 2: If any columns missed, read from parquet for misses.
         if has_miss {
             let record_batch = self
                 .read_parquet_batch_and_fill_cache(self.current_batch_id)

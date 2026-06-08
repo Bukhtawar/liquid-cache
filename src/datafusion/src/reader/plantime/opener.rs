@@ -414,8 +414,37 @@ impl FileOpener for LiquidParquetOpener {
                 return Ok(adapted.boxed());
             }
 
-            // High selectivity (many rows to decode) or no predicate → use LC
-            // Warm cache avoids repeated parquet decompress+decode.
+            // For full-scan queries with large decoded volume, parquet's batch decode
+            // from OS page cache is faster than LC's per-column pipeline.
+            let num_proj_cols = projection.column_indices().len() as u64;
+            let estimated_decode_bytes = selected_rows as u64 * num_proj_cols * 8;
+            const LC_FULL_SCAN_BYPASS_BYTES: u64 = 500_000_000; // 500MB
+            if estimated_selectivity >= 0.95 && estimated_decode_bytes > LC_FULL_SCAN_BYPASS_BYTES {
+                log::info!(
+                    "[LC-Opener] DELEGATE (full-scan-too-large): selectivity={:.3}, decode_est={}MB, cols={}, file={}",
+                    estimated_selectivity, estimated_decode_bytes / 1_000_000, num_proj_cols, file_name
+                );
+                let mut plain_builder = ParquetRecordBatchStreamBuilder::new_with_metadata(
+                    async_file_reader,
+                    reader_metadata,
+                )
+                .with_batch_size(batch_size)
+                .with_projection(mask)
+                .with_row_groups(row_group_indexes);
+
+                if let Some(sel) = row_selection {
+                    plain_builder = plain_builder.with_row_selection(sel);
+                }
+                if let Some(lim) = limit {
+                    plain_builder = plain_builder.with_limit(lim);
+                }
+
+                let stream = plain_builder.build()?;
+                let adapted = stream
+                    .map_err(|e| DataFusionError::External(Box::new(e)));
+                return Ok(adapted.boxed());
+            }
+
             log::info!(
                 "[LC-Opener] LC STREAM: selectivity={:.3}, predicate={}, file={}",
                 estimated_selectivity, predicate.is_some(), file_name
